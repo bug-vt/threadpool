@@ -12,3 +12,5 @@
 /threadpool_test4
 /threadpool_test5
 /threadpool_test6
+*.swp
+*.swo
