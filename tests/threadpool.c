@@ -28,7 +28,7 @@ struct thread_pool {
     //struct list completed; 
     //pthread_mutex_t completed_mutex;
     pthread_cond_t workAvail; 
-    bool shut_down;
+    bool shutDown;
 };
 
 struct worker {
@@ -38,7 +38,7 @@ struct worker {
     pthread_t tid;
 };
 
-_Thread_local struct worker *currentWorker; 
+static _Thread_local struct worker *currentWorker; 
 
 
 /**
@@ -49,32 +49,44 @@ _Thread_local struct worker *currentWorker;
  * case 4. If all the above fail, idle
  */
 static void *
-worker_thread(void * no_arg)
+worker_thread(void * newWorker)
 {
+    // set up current worker
+    currentWorker = (struct worker*) newWorker;
+    currentWorker->tid = pthread_self();
+     
     struct thread_pool *pool = currentWorker->pool;
     struct list_elem *elem = NULL;
 
-    if (list_empty(&currentWorker->localDeque)) {
-        // case 3
-        if (list_empty(&pool->globalDeque)) { 
-            // steal work from other workers
-        }
-        // case 2
-        else { 
-            elem = list_pop_front(&pool->globalDeque);
-        }
-    }
-    // case 1
-    else { 
-        elem = list_pop_front(&currentWorker->localDeque);
-    }
+    Pthread_mutex_lock(&pool->poolMutex);
 
-    // perfrom work
-    if (elem != NULL) {
-        struct future *fut = list_entry(elem, struct future, link);
-        fut->result = fut->task(pool, fut->args);
+    while (!pool->shutDown) {
+        // wait for workAvail signal
+        Pthread_cond_wait(&pool->workAvail, &pool->poolMutex);
+        
+        if (list_empty(&currentWorker->localDeque)) {
+            // case 3
+            if (list_empty(&pool->globalDeque)) { 
+                // steal work from other workers
+            }
+            // case 2
+            else { 
+                elem = list_pop_front(&pool->globalDeque);
+            }
+        }
+        // case 1
+        else { 
+            elem = list_pop_front(&currentWorker->localDeque);
+        }
+
+        // perfrom work
+        if (elem != NULL) {
+            struct future *fut = list_entry(elem, struct future, link);
+            fut->result = fut->task(pool, fut->args);
+        }
     }
     
+    Pthread_mutex_unlock(&pool->poolMutex);
     return NULL;
 }
 
@@ -90,7 +102,12 @@ thread_pool_new(int nthreads)
     // create n worker threads
     pthread_t *workers = malloc(nthreads * sizeof(pthread_t));
     for (int i = 0; i < nthreads; i++) {
-        Pthread_create(workers + i, worker_thread, NULL);                       
+        struct worker *newWorker = malloc(sizeof(struct worker)); 
+        newWorker->pool = pool;
+        list_init(&newWorker->localDeque);
+        newWorker->index = i;
+
+        Pthread_create(workers + i, worker_thread, newWorker);                       
     }
 
     // set up thread pool
@@ -98,7 +115,7 @@ thread_pool_new(int nthreads)
     list_init(&pool->globalDeque);
     Pthread_mutex_init(&pool->poolMutex);
     Pthread_cond_init(&pool->workAvail);
-    pool->shut_down = false;
+    pool->shutDown = false;
 
     return pool;
 }
