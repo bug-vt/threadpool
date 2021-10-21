@@ -16,7 +16,7 @@ LDFLAGS=-pthread
 #LDFLAGS=-pthread -fsanitize=undefined
 #CFLAGS=-Wall -O0 -g -Werror -Wmissing-prototypes -fopenmp -fsanitize=undefined
 
-OBJ=threadpool.o list.o threadpool_lib.o
+OBJ=threadpool.o list.o threadpool_lib.o wrapper.o
 
 ALL=quicksort psum_test fib_test mergesort nqueens \
 	threadpool_test threadpool_test2 threadpool_test3 threadpool_test4 threadpool_test5 \

@@ -32,22 +32,41 @@ struct thread_pool {
 };
 
 struct worker {
-    struct thread_pool * pool;
+    struct thread_pool * pool; // path to access global queue
     int index;
     struct list localDeque;
+    pthread_t tid;
 };
 
 _Thread_local struct worker *currentWorker; 
 
+static void *
+worker_thread(void * no_arg)
+{
+    return NULL;
+}
 
 struct thread_pool * 
 thread_pool_new(int nthreads)
 {
+    struct thread_pool *pool = malloc(sizeof(struct thread_pool)); 
+
+    // create n worker threads
+    pthread_t *workers = malloc(nthreads * sizeof(pthread_t));
     for (int i = 0; i < nthreads; i++) {
-            
+        Pthread_create(workers + i, worker_thread, NULL);                       
     }
-    return NULL;
+
+    // set up thread pool
+    pool->workers = workers;
+    list_init(&pool->globalDeque);
+    Pthread_mutex_init(&pool->poolMutex);
+    Pthread_cond_init(&pool->workAvail);
+    pool->shut_down = false;
+
+    return pool;
 }
+
 
 
 void 

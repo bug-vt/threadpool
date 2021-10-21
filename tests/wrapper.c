@@ -6,6 +6,28 @@
 
 #include "wrapper.h"
 
+// wrapper for ptheread create
+void Pthread_create(pthread_t *restrict thread,
+                    void *(*start_routine)(void *),
+                    void *restrict arg)
+{
+    int err = pthread_create(thread, NULL, start_routine, arg);
+    if (err != 0) {
+        perror("Pthread_craete error");
+        exit(err);
+    }
+}
+
+// wrapper for mutex init
+void Pthread_mutex_init(pthread_mutex_t *mutex)
+{
+    int err = pthread_mutex_init(mutex, NULL);
+    if (err != 0)
+    {
+        perror("Pthread_mutex_init error");
+        exit(err);
+    }
+}
 
 // wrapper for mutex lock
 void Pthread_mutex_lock(pthread_mutex_t *mutex)
@@ -23,6 +45,17 @@ void Pthread_mutex_unlock(pthread_mutex_t *mutex)
     int err = pthread_mutex_unlock(mutex);
     if (err != 0) {
         perror("Pthread_mutex_unlock error");
+        exit(err);
+    }
+}
+
+// wrapper for cond init
+void Pthread_cond_init(pthread_cond_t *cond)
+{
+    int err = pthread_cond_init(cond, NULL);
+    if (err != 0)
+    {
+        perror("Pthread_mutex_init error");
         exit(err);
     }
 }

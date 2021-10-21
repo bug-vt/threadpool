@@ -14,8 +14,11 @@
 #include <stdio.h> // perror
 #include <stdlib.h> // exit
 
+void Pthread_create(pthread_t *thread, void *(*start_routine)(void *), void *arg);
+void Pthread_mutex_init(pthread_mutex_t *mutex);
 void Pthread_mutex_lock(pthread_mutex_t *mutex);
 void Pthread_mutex_unlock(pthread_mutex_t *mutex);
+void Pthread_cond_init(pthread_cond_t *cond);
 void Pthread_cond_signal(pthread_cond_t *cond);
 void Pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
 void Sem_init(sem_t *sem, int pshared, unsigned int value);
