@@ -10,6 +10,9 @@
 #include <stdbool.h>
 #include "list.h"
 
+//#include <stdio.h>
+//#include <unistd.h>
+
 typedef enum {
     READY, RUNNING, COMPLETED
 } Status;
@@ -21,7 +24,7 @@ struct future {
     struct list_elem link;
     struct thread_pool * pool;
     Status status;
-    pthread_cond_t done;
+    sem_t done;
 };
 
 struct thread_pool {
@@ -31,7 +34,7 @@ struct thread_pool {
     pthread_mutex_t poolMutex;
     //struct list completed; 
     //pthread_mutex_t completed_mutex;
-    pthread_cond_t workAvail; 
+    sem_t workAvail; 
     bool shutDown;
 };
 
@@ -61,12 +64,13 @@ worker_thread(void * newWorker)
      
     struct thread_pool *pool = currentWorker->pool;
 
-    Pthread_mutex_lock(&pool->poolMutex);
 
     while (!pool->shutDown) {
         // wait for workAvail signal
-        Pthread_cond_wait(&pool->workAvail, &pool->poolMutex);
+        Sem_wait(&pool->workAvail);
         
+        Pthread_mutex_lock(&pool->poolMutex);
+
         struct list_elem *elem = NULL;
         if (list_empty(&currentWorker->localDeque)) {
             // case 3
@@ -83,16 +87,23 @@ worker_thread(void * newWorker)
             elem = list_pop_front(&currentWorker->localDeque);
         }
 
+        Pthread_mutex_unlock(&pool->poolMutex);
         // perfrom work
         if (elem != NULL) {
             struct future *fut = list_entry(elem, struct future, link);
+            // To do:
+            // deadlock when task function create sub-task,
+            // since it wait for 
             fut->result = fut->task(pool, fut->args);
+
+            Pthread_mutex_lock(&pool->poolMutex);
             fut->status = COMPLETED;
-            Pthread_cond_signal(&fut->done); 
+            Sem_post(&fut->done); 
+            Pthread_mutex_unlock(&pool->poolMutex);
         }
+        
     }
     
-    Pthread_mutex_unlock(&pool->poolMutex);
     free(currentWorker);
     return NULL;
 }
@@ -109,8 +120,10 @@ thread_pool_new(int nthreads)
     pool->workerCount = nthreads;
     list_init(&pool->globalDeque);
     Pthread_mutex_init(&pool->poolMutex);
-    Pthread_cond_init(&pool->workAvail);
+    Sem_init(&pool->workAvail, 0, 0);
     pool->shutDown = false;
+
+    Pthread_mutex_lock(&pool->poolMutex); 
 
     // create n worker threads
     pthread_t *workers = malloc(nthreads * sizeof(pthread_t));
@@ -125,6 +138,8 @@ thread_pool_new(int nthreads)
 
     pool->workers = workers;
 
+    Pthread_mutex_unlock(&pool->poolMutex); 
+
     return pool;
 }
 
@@ -132,12 +147,15 @@ thread_pool_new(int nthreads)
 void 
 thread_pool_shutdown_and_destroy(struct thread_pool * pool)
 {
+
     pool->shutDown = true;
     for (int i = 0; i < pool->workerCount; i++) {
+        Sem_post(&pool->workAvail); 
         pthread_join(pool->workers[i], NULL);
     }
     free(pool->workers); 
     free(pool);
+
 }
 
 /**
@@ -155,7 +173,7 @@ thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
     fut->args = data;
     fut->pool = pool;
     fut->status = READY;
-    Pthread_cond_init(&fut->done);
+    Sem_init(&fut->done, 0, 0);
 
     // lock for share data (global, local deque)
     Pthread_mutex_lock(&pool->poolMutex); 
@@ -163,14 +181,12 @@ thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
     // external submission from main thread
     if (currentWorker == NULL) { 
         list_push_front(&pool->globalDeque, &fut->link);
-        // notify all workers that work is available
-        Pthread_cond_signal(&pool->workAvail); 
     }
     else { //internal submision from worker thread
         list_push_front(&currentWorker->localDeque, &fut->link);
-        // notify all workers that work is available
-        Pthread_cond_signal(&pool->workAvail); 
     }
+    // notify all workers that work is available
+    Sem_post(&pool->workAvail); 
 
     Pthread_mutex_unlock(&pool->poolMutex);
     return fut;
@@ -185,21 +201,19 @@ thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
 void *
 future_get(struct future * fut)
 {
-    struct thread_pool * pool = fut->pool;
+    //struct thread_pool * pool = fut->pool;
 
-    Pthread_mutex_lock(&pool->poolMutex);
-
-    while (fut->status != COMPLETED) {
+    //while (fut->status != COMPLETED) {
         if (currentWorker == NULL) {
-            Pthread_cond_wait(&fut->done, &pool->poolMutex);
+            Sem_wait(&fut->done);
         }
         else {
             // TO DO: implement work helping
-            Pthread_cond_wait(&fut->done, &pool->poolMutex); // place holder code
+            //Sem_wait(&fut->done); // place holder code
+            fut->result = fut->task(fut->pool, fut->args);
         }
-    }
+    //}
 
-    Pthread_mutex_unlock(&pool->poolMutex);
     return fut->result;
 }
 
