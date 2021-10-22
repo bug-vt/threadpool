@@ -86,14 +86,12 @@ worker_thread(void * newWorker)
         else { 
             elem = list_pop_front(&currentWorker->localDeque);
         }
-
+        // unlock to avoid recursive lock from calling fut->task function
         Pthread_mutex_unlock(&pool->poolMutex);
         // perfrom work
         if (elem != NULL) {
             struct future *fut = list_entry(elem, struct future, link);
-            // To do:
-            // deadlock when task function create sub-task,
-            // since it wait for 
+            // generate sub-task and store result 
             fut->result = fut->task(pool, fut->args);
 
             Pthread_mutex_lock(&pool->poolMutex);
@@ -203,16 +201,15 @@ future_get(struct future * fut)
 {
     //struct thread_pool * pool = fut->pool;
 
-    //while (fut->status != COMPLETED) {
-        if (currentWorker == NULL) {
-            Sem_wait(&fut->done);
-        }
-        else {
-            // TO DO: implement work helping
-            //Sem_wait(&fut->done); // place holder code
-            fut->result = fut->task(fut->pool, fut->args);
-        }
-    //}
+    // main thread
+    if (currentWorker == NULL) {
+        Sem_wait(&fut->done);
+    }
+    // worker thread
+    else {
+        // TO DO: implement work helping
+        fut->result = fut->task(fut->pool, fut->args); //place holder
+    }
 
     return fut->result;
 }

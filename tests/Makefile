@@ -49,4 +49,5 @@ fib_test: fib_test.o $(OBJ)
 clean:
 	rm -f *.o $(ALL)
 	rm -rf fj_testdir*
+	rm -f runresult*
 
