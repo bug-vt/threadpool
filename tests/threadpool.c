@@ -10,19 +10,23 @@
 #include <stdbool.h>
 #include "list.h"
 
-
+typedef enum {
+    READY, RUNNING, COMPLETED
+} Status;
 
 struct future {
     fork_join_task_t task;
     void* args;
     void* result;
     struct list_elem link;
-    // TO DO:
-    // Synchronization primitives
+    struct thread_pool * pool;
+    Status status;
+    pthread_cond_t done;
 };
 
 struct thread_pool {
     pthread_t *workers;
+    int workerCount;
     struct list globalDeque;
     pthread_mutex_t poolMutex;
     //struct list completed; 
@@ -56,7 +60,6 @@ worker_thread(void * newWorker)
     currentWorker->tid = pthread_self();
      
     struct thread_pool *pool = currentWorker->pool;
-    struct list_elem *elem = NULL;
 
     Pthread_mutex_lock(&pool->poolMutex);
 
@@ -64,6 +67,7 @@ worker_thread(void * newWorker)
         // wait for workAvail signal
         Pthread_cond_wait(&pool->workAvail, &pool->poolMutex);
         
+        struct list_elem *elem = NULL;
         if (list_empty(&currentWorker->localDeque)) {
             // case 3
             if (list_empty(&pool->globalDeque)) { 
@@ -83,10 +87,13 @@ worker_thread(void * newWorker)
         if (elem != NULL) {
             struct future *fut = list_entry(elem, struct future, link);
             fut->result = fut->task(pool, fut->args);
+            fut->status = COMPLETED;
+            Pthread_cond_signal(&fut->done); 
         }
     }
     
     Pthread_mutex_unlock(&pool->poolMutex);
+    free(currentWorker);
     return NULL;
 }
 
@@ -97,7 +104,13 @@ worker_thread(void * newWorker)
 struct thread_pool * 
 thread_pool_new(int nthreads)
 {
+    // set up thread pool
     struct thread_pool *pool = malloc(sizeof(struct thread_pool)); 
+    pool->workerCount = nthreads;
+    list_init(&pool->globalDeque);
+    Pthread_mutex_init(&pool->poolMutex);
+    Pthread_cond_init(&pool->workAvail);
+    pool->shutDown = false;
 
     // create n worker threads
     pthread_t *workers = malloc(nthreads * sizeof(pthread_t));
@@ -110,12 +123,7 @@ thread_pool_new(int nthreads)
         Pthread_create(workers + i, worker_thread, newWorker);                       
     }
 
-    // set up thread pool
     pool->workers = workers;
-    list_init(&pool->globalDeque);
-    Pthread_mutex_init(&pool->poolMutex);
-    Pthread_cond_init(&pool->workAvail);
-    pool->shutDown = false;
 
     return pool;
 }
@@ -124,6 +132,12 @@ thread_pool_new(int nthreads)
 void 
 thread_pool_shutdown_and_destroy(struct thread_pool * pool)
 {
+    pool->shutDown = true;
+    for (int i = 0; i < pool->workerCount; i++) {
+        pthread_join(pool->workers[i], NULL);
+    }
+    free(pool->workers); 
+    free(pool);
 }
 
 /**
@@ -136,37 +150,61 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
 struct future *
 thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
 {
-    struct future *newTask = malloc(sizeof(struct future));
-    newTask->task = task;
-    newTask->args = data;
+    struct future *fut = malloc(sizeof(struct future));
+    fut->task = task;
+    fut->args = data;
+    fut->pool = pool;
+    fut->status = READY;
+    Pthread_cond_init(&fut->done);
 
     // lock for share data (global, local deque)
     Pthread_mutex_lock(&pool->poolMutex); 
 
     // external submission from main thread
     if (currentWorker == NULL) { 
-        list_push_front(&pool->globalDeque, &newTask->link);
+        list_push_front(&pool->globalDeque, &fut->link);
         // notify all workers that work is available
         Pthread_cond_signal(&pool->workAvail); 
     }
     else { //internal submision from worker thread
-        list_push_front(&currentWorker->localDeque, &newTask->link);
+        list_push_front(&currentWorker->localDeque, &fut->link);
         // notify all workers that work is available
         Pthread_cond_signal(&pool->workAvail); 
     }
 
     Pthread_mutex_unlock(&pool->poolMutex);
-    return newTask;
+    return fut;
 }
 
-
+/**
+ * If the calling thread is the main thread (external thread), than
+ * it will be blocked if the task have not been completed.
+ * Otherwise, if the function was called by worker threads, than
+ * it can help finishing task (Work helping).
+ */
 void *
-future_get(struct future * task)
+future_get(struct future * fut)
 {
-    return NULL;
+    struct thread_pool * pool = fut->pool;
+
+    Pthread_mutex_lock(&pool->poolMutex);
+
+    while (fut->status != COMPLETED) {
+        if (currentWorker == NULL) {
+            Pthread_cond_wait(&fut->done, &pool->poolMutex);
+        }
+        else {
+            // TO DO: implement work helping
+            Pthread_cond_wait(&fut->done, &pool->poolMutex); // place holder code
+        }
+    }
+
+    Pthread_mutex_unlock(&pool->poolMutex);
+    return fut->result;
 }
 
 void 
-future_free(struct future * task)
+future_free(struct future * fut)
 {
+    free(fut);
 }
