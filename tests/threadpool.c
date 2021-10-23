@@ -66,8 +66,10 @@ worker_thread(void * newWorker)
      
     struct thread_pool *pool = currentWorker->pool;
 
+    pthread_mutex_lock(&pool->poolMutex);
 
     while (!pool->shutDown) {
+        pthread_mutex_unlock(&pool->poolMutex);
         // wait for workAvail signal
         sem_wait(&pool->workAvail);
         
@@ -89,30 +91,28 @@ worker_thread(void * newWorker)
             elem = list_pop_front(&currentWorker->localDeque);
         }
         // unlock to avoid recursive lock from calling fut->task function
-        pthread_mutex_unlock(&pool->poolMutex);
         // perfrom work
         if (elem != NULL) {
-            pthread_mutex_lock(&pool->poolMutex);
             struct future *fut = list_entry(elem, struct future, link);
             fut->status = RUNNING;
-            pthread_mutex_unlock(&pool->poolMutex);
 
             // generate sub-task and store result 
             if (fut->task == NULL) {
                 //printf("NULL task\n");
             }
             if (fut->task != NULL) {
+                pthread_mutex_unlock(&pool->poolMutex);
                 fut->result = fut->task(pool, fut->args);
+                pthread_mutex_lock(&pool->poolMutex);
             }
 
-            pthread_mutex_lock(&pool->poolMutex);
             fut->status = COMPLETED;
             sem_post(&fut->done); 
-            pthread_mutex_unlock(&pool->poolMutex);
         }
         
     }
     
+    pthread_mutex_unlock(&pool->poolMutex);
     free(currentWorker);
     return NULL;
 }
@@ -160,8 +160,12 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
     pool->shutDown = true;
     pthread_mutex_unlock(&pool->poolMutex); 
 
+    // broadcast to all workers to wake up
     for (int i = 0; i < pool->workerCount; i++) {
         sem_post(&pool->workAvail); 
+    }
+    // wait for all workers to come home
+    for (int i = 0; i < pool->workerCount; i++) {
         pthread_join(pool->workers[i], NULL);
     }
     free(pool->workers); 
