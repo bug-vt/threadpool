@@ -83,25 +83,25 @@ worker_thread(void * newWorker)
             }
             // case 2
             else { 
-                elem = list_pop_front(&pool->globalDeque);
+                elem = list_pop_back(&pool->globalDeque);
             }
         }
         // case 1
         else { 
             elem = list_pop_front(&currentWorker->localDeque);
         }
-        // unlock to avoid recursive lock from calling fut->task function
         // perfrom work
         if (elem != NULL) {
             struct future *fut = list_entry(elem, struct future, link);
             fut->status = RUNNING;
 
-            // generate sub-task and store result 
             if (fut->task == NULL) {
                 //printf("NULL task\n");
             }
             if (fut->task != NULL) {
+                // unlock to avoid recursive lock from calling fut->task function
                 pthread_mutex_unlock(&pool->poolMutex);
+                // generate sub-task and store result 
                 fut->result = fut->task(pool, fut->args);
                 pthread_mutex_lock(&pool->poolMutex);
             }
@@ -142,7 +142,11 @@ thread_pool_new(int nthreads)
         list_init(&newWorker->localDeque);
         newWorker->index = i;
 
-        pthread_create(workers + i, NULL, worker_thread, newWorker);                       
+        int err = pthread_create(workers + i, NULL, worker_thread, newWorker);
+        if (err != 0) {
+            perror("pthread_create error");
+            abort();
+        }
     }
 
     pool->workers = workers;
@@ -168,6 +172,8 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
     for (int i = 0; i < pool->workerCount; i++) {
         pthread_join(pool->workers[i], NULL);
     }
+
+    pthread_mutex_destroy(&pool->poolMutex);
     free(pool->workers); 
     free(pool);
 
@@ -183,6 +189,9 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
 struct future *
 thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
 {
+    // lock for share data (global, local deque)
+    pthread_mutex_lock(&pool->poolMutex); 
+
     struct future *fut = malloc(sizeof(struct future));
     fut->task = task;
     fut->args = data;
@@ -190,17 +199,15 @@ thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
     fut->status = READY;
     sem_init(&fut->done, 0, 0);
 
-    // lock for share data (global, local deque)
-    pthread_mutex_lock(&pool->poolMutex); 
 
     // external submission from main thread
     if (currentWorker == NULL) { 
         list_push_front(&pool->globalDeque, &fut->link);
     }
     else { //internal submision from worker thread
-        list_push_front(&currentWorker->localDeque, &fut->link);
+        list_push_back(&currentWorker->localDeque, &fut->link);
     }
-    // notify all workers that work is available
+    // notify workers that work is available
     sem_post(&pool->workAvail); 
 
     pthread_mutex_unlock(&pool->poolMutex);
@@ -226,10 +233,8 @@ future_get(struct future * fut)
     else {
         // TO DO: implement work helping
         if (fut->status == READY) {
-            if (fut->task == NULL) {
-                printf("fut_get NULL here\n");
-            }
             fut->result = fut->task(fut->pool, fut->args); 
+
             pthread_mutex_lock(&pool->poolMutex);
             fut->status = COMPLETED;
             sem_post(&fut->done); 
