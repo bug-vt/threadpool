@@ -48,19 +48,42 @@ struct thread_pool {
 
 static _Thread_local struct worker *currentWorker; 
 
+/**
+ * Check if there is any work to do for current worker.
+ * There is no work when all following are met:
+ * 1. local deque from current worker is empty
+ * 2. global deque from thread pool is empty
+ * 3. All other workers' local deque is empty (nothing to steal)
+ */
 static bool
 no_work()
 {
     struct thread_pool *pool = currentWorker->pool;
     if (list_empty(&currentWorker->localDeque) && list_empty(&pool->globalDeque)) {
-        
+        // To Do:
+        // check if all other workes' local deque is empty
         return !pool->shutDown;
     }
     return false;
 }
 
 /**
- * Work stealing approach was used:
+ * Steal work from other workers (if possible).
+ */
+static struct list_elem * 
+steal_work()
+{
+    // 1. iterate through workers inside the pool
+    // 2. find the first worker have work (non-empty local deque)
+    // 3. steal that work (dequeue from the local deque)
+    //
+    // if all fail do nothing
+    
+    return NULL;
+}
+
+/**
+ * Worker fetch a work in a following order:
  * case 1. Perform task by dequeuing from worker's own deque
  * case 2. If empty, check global queue first and dequeue
  * case 3. Otherwise, try to steal task from other worker's deque
@@ -87,8 +110,7 @@ worker_thread(void * newWorker)
         if (list_empty(&currentWorker->localDeque)) {
             // case 3
             if (list_empty(&pool->globalDeque)) { 
-                elem = NULL;
-                // steal work from other workers
+                elem = steal_work(); 
             }
             // case 2
             else { 
@@ -116,6 +138,7 @@ worker_thread(void * newWorker)
             pthread_cond_signal(&fut->done);
         }
     }
+
     pthread_mutex_unlock(&pool->poolMutex);
     free(currentWorker);
     return NULL;
@@ -179,7 +202,9 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
         pthread_join(pool->workers[i]->tid, NULL);
     }
 
-    //pthread_mutex_destroy(&pool->poolMutex);
+    pthread_mutex_destroy(&pool->poolMutex);
+    pthread_cond_destroy(&pool->workAvail);
+    pthread_barrier_destroy(&pool->barrier);
     free(pool->workers); 
     free(pool);
 
@@ -240,8 +265,8 @@ future_get(struct future * fut)
     }
     // worker thread
     else {
-        // work helping
-        // if the task is not yet started, then the worker would
+        // -- work helping --
+        // 1. if the task is not yet started, then the worker would
         // executed it itself.
         if (fut->status == READY) {
             // future is READY only when it is inside the deque.
@@ -249,13 +274,18 @@ future_get(struct future * fut)
             list_remove(&fut->link);
             fut->status = RUNNING;
 
+            // unlock to avoid recursive lock from calling fut->task function
             pthread_mutex_unlock(&pool->poolMutex);
+            // Perform task
             fut->result = fut->task(fut->pool, fut->args); 
             pthread_mutex_lock(&pool->poolMutex);
             
             fut->status = COMPLETED;
             pthread_cond_signal(&fut->done); 
         }
+        // 2. otherwise, it could wait for it to finish, (current)
+        //      or it could help by executing tasks spawned by the task being
+        //      joined
         else {
             while (fut->status != COMPLETED) {
                 pthread_cond_wait(&fut->done, &pool->poolMutex);
