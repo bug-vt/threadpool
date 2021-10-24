@@ -2,7 +2,7 @@
  * threadpool.c
  *
  * Written by: Bug Lee, Dana altarace
- * Last modified : 10/21/21
+ * Last modified : 10/24/21
  */
 
 #include "threadpool.h"
@@ -11,7 +11,7 @@
 #include "list.h"
 #include <pthread.h>
 #include <semaphore.h>
-#include <stdlib.h> //free
+#include <stdlib.h> // free
 #include <stdio.h> // perror
 #include <unistd.h>
 
@@ -26,7 +26,7 @@ struct future {
     struct list_elem link;
     struct thread_pool * pool;
     Status status;
-    sem_t done;
+    pthread_cond_t done;
 };
 
 struct worker {
@@ -52,8 +52,9 @@ static bool
 no_work()
 {
     struct thread_pool *pool = currentWorker->pool;
-    if (list_empty(&currentWorker->localDeque) && !list_empty(&pool->globalDeque)) {
-        return true;
+    if (list_empty(&currentWorker->localDeque) && list_empty(&pool->globalDeque)) {
+        
+        return !pool->shutDown;
     }
     return false;
 }
@@ -82,10 +83,11 @@ worker_thread(void * newWorker)
             pthread_cond_wait(&pool->workAvail, &pool->poolMutex);
         }
 
-        struct list_elem *elem = NULL;
+        struct list_elem *elem;
         if (list_empty(&currentWorker->localDeque)) {
             // case 3
             if (list_empty(&pool->globalDeque)) { 
+                elem = NULL;
                 // steal work from other workers
             }
             // case 2
@@ -97,22 +99,23 @@ worker_thread(void * newWorker)
         else { 
             elem = list_pop_front(&currentWorker->localDeque);
         }
-        // perfrom work
+
         if (elem != NULL) {
+            // perfrom work
             struct future *fut = list_entry(elem, struct future, link);
             fut->status = RUNNING;
-
+            
             // unlock to avoid recursive lock from calling fut->task function
             pthread_mutex_unlock(&pool->poolMutex);
             // generate sub-task and store result 
             fut->result = fut->task(pool, fut->args);
+            // relock after getting result
             pthread_mutex_lock(&pool->poolMutex);
 
             fut->status = COMPLETED;
-            sem_post(&fut->done);
+            pthread_cond_signal(&fut->done);
         }
     }
-    
     pthread_mutex_unlock(&pool->poolMutex);
     free(currentWorker);
     return NULL;
@@ -153,7 +156,8 @@ thread_pool_new(int nthreads)
 
     pool->workers = workers;
 
-    pthread_mutex_unlock(&pool->poolMutex); 
+    pthread_mutex_unlock(&pool->poolMutex);
+    // wait for all worker threads to be spawn before continuing
     pthread_barrier_wait(&pool->barrier);
 
     return pool;
@@ -168,14 +172,14 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
     pool->shutDown = true;
     // broadcast to all workers to wake up
     pthread_cond_broadcast(&pool->workAvail); 
-
+    
     pthread_mutex_unlock(&pool->poolMutex); 
     // wait for all workers to come home
     for (int i = 0; i < pool->workerCount; i++) {
         pthread_join(pool->workers[i]->tid, NULL);
     }
 
-    pthread_mutex_destroy(&pool->poolMutex);
+    //pthread_mutex_destroy(&pool->poolMutex);
     free(pool->workers); 
     free(pool);
 
@@ -199,7 +203,7 @@ thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
     fut->args = data;
     fut->pool = pool;
     fut->status = READY;
-    sem_init(&fut->done, 0, 0);
+    pthread_cond_init(&fut->done, NULL);
 
 
     // external submission from main thread
@@ -226,33 +230,46 @@ void *
 future_get(struct future * fut)
 {
     struct thread_pool * pool = fut->pool;
+    pthread_mutex_lock(&pool->poolMutex);
 
     // main thread
     if (currentWorker == NULL) {
-        sem_wait(&fut->done);
+        while (fut->status != COMPLETED) {
+            pthread_cond_wait(&fut->done, &pool->poolMutex);
+        }
     }
     // worker thread
     else {
-        // TO DO: implement work helping
+        // work helping
+        // if the task is not yet started, then the worker would
+        // executed it itself.
         if (fut->status == READY) {
-            fut->result = fut->task(fut->pool, fut->args); 
+            // future is READY only when it is inside the deque.
+            // so it is safe and must be remove from the deque to run it.
+            list_remove(&fut->link);
+            fut->status = RUNNING;
 
-            pthread_mutex_lock(&pool->poolMutex);
-            fut->status = COMPLETED;
-            sem_post(&fut->done); 
             pthread_mutex_unlock(&pool->poolMutex);
+            fut->result = fut->task(fut->pool, fut->args); 
+            pthread_mutex_lock(&pool->poolMutex);
+            
+            fut->status = COMPLETED;
+            pthread_cond_signal(&fut->done); 
         }
-        else if (fut->status != COMPLETED) {
-            sem_wait(&fut->done);
+        else {
+            while (fut->status != COMPLETED) {
+                pthread_cond_wait(&fut->done, &pool->poolMutex);
+            }
         }
     }
 
+    pthread_mutex_unlock(&pool->poolMutex);
     return fut->result;
 }
 
 void 
 future_free(struct future * fut)
 {
-    sem_destroy(&fut->done);
+    pthread_cond_destroy(&fut->done);
     free(fut);
 }
