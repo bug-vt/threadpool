@@ -40,9 +40,8 @@ struct thread_pool {
     int workerCount;
     struct list globalDeque;
     pthread_mutex_t poolMutex;
-    //struct list completed; 
-    //pthread_mutex_t completed_mutex;
     pthread_cond_t workAvail; 
+    pthread_barrier_t barrier;
     bool shutDown;
 };
 
@@ -50,10 +49,10 @@ struct thread_pool {
 static _Thread_local struct worker *currentWorker; 
 
 static bool
-have_work()
+no_work()
 {
     struct thread_pool *pool = currentWorker->pool;
-    if (!list_empty(&currentWorker->localDeque) || !list_empty(&pool->globalDeque)) {
+    if (list_empty(&currentWorker->localDeque) && !list_empty(&pool->globalDeque)) {
         return true;
     }
     return false;
@@ -74,47 +73,43 @@ worker_thread(void * newWorker)
      
     struct thread_pool *pool = currentWorker->pool;
 
+    pthread_barrier_wait(&pool->barrier);
     pthread_mutex_lock(&pool->poolMutex);
 
     while (!pool->shutDown) {
-        // wait for workAvail signal
-        pthread_cond_wait(&pool->workAvail, &pool->poolMutex);
+        while (no_work()) {
+            // wait for workAvail signal
+            pthread_cond_wait(&pool->workAvail, &pool->poolMutex);
+        }
 
-        while (have_work()) {
-            struct list_elem *elem = NULL;
-            if (list_empty(&currentWorker->localDeque)) {
-                // case 3
-                if (list_empty(&pool->globalDeque)) { 
-                    // steal work from other workers
-                }
-                // case 2
-                else { 
-                    elem = list_pop_back(&pool->globalDeque);
-                }
+        struct list_elem *elem = NULL;
+        if (list_empty(&currentWorker->localDeque)) {
+            // case 3
+            if (list_empty(&pool->globalDeque)) { 
+                // steal work from other workers
             }
-            // case 1
+            // case 2
             else { 
-                elem = list_pop_front(&currentWorker->localDeque);
+                elem = list_pop_back(&pool->globalDeque);
             }
-            // perfrom work
-            if (elem != NULL) {
-                struct future *fut = list_entry(elem, struct future, link);
-                fut->status = RUNNING;
+        }
+        // case 1
+        else { 
+            elem = list_pop_front(&currentWorker->localDeque);
+        }
+        // perfrom work
+        if (elem != NULL) {
+            struct future *fut = list_entry(elem, struct future, link);
+            fut->status = RUNNING;
 
-                if (fut->task == NULL) {
-                    //printf("NULL task\n");
-                }
-                if (fut->task != NULL) {
-                    // unlock to avoid recursive lock from calling fut->task function
-                    pthread_mutex_unlock(&pool->poolMutex);
-                    // generate sub-task and store result 
-                    fut->result = fut->task(pool, fut->args);
-                    pthread_mutex_lock(&pool->poolMutex);
-                }
+            // unlock to avoid recursive lock from calling fut->task function
+            pthread_mutex_unlock(&pool->poolMutex);
+            // generate sub-task and store result 
+            fut->result = fut->task(pool, fut->args);
+            pthread_mutex_lock(&pool->poolMutex);
 
-                fut->status = COMPLETED;
-                sem_post(&fut->done); 
-            }
+            fut->status = COMPLETED;
+            sem_post(&fut->done);
         }
     }
     
@@ -136,6 +131,7 @@ thread_pool_new(int nthreads)
     list_init(&pool->globalDeque);
     pthread_mutex_init(&pool->poolMutex, NULL);
     pthread_cond_init(&pool->workAvail, NULL);
+    pthread_barrier_init(&pool->barrier, NULL, nthreads + 1);
     pool->shutDown = false;
 
     pthread_mutex_lock(&pool->poolMutex); 
@@ -158,6 +154,7 @@ thread_pool_new(int nthreads)
     pool->workers = workers;
 
     pthread_mutex_unlock(&pool->poolMutex); 
+    pthread_barrier_wait(&pool->barrier);
 
     return pool;
 }
@@ -256,5 +253,6 @@ future_get(struct future * fut)
 void 
 future_free(struct future * fut)
 {
+    sem_destroy(&fut->done);
     free(fut);
 }
