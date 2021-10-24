@@ -57,12 +57,20 @@ static _Thread_local struct worker *currentWorker; //HERE!!!!
  */
 static bool
 no_work()
-{
+{ //NOTE NEEDS TO CHECK!!!
     struct thread_pool *pool = currentWorker->pool;
     if (list_empty(&currentWorker->localDeque) && list_empty(&pool->globalDeque)) {
         // To Do:
         // check if all other workes' local deque is empty
-        return !pool->shutDown;
+        bool flag = false;
+        for(int i = 0; i< currentWorker->pool->workerCount; i++ ) {
+            if(!list_empty(&pool->workers[i]->localDeque)) {
+                //means work is there
+               flag = true;
+            }
+        }
+        return ((!flag) && !pool->shutDown);
+
     }
     return false;
 }
