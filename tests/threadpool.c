@@ -37,7 +37,7 @@ struct worker {
 
 struct thread_pool {
     struct worker **workers;
-    int workerCount;
+    int workerCount; //workercount is nthreads. will never be 0, the shutdown is when it reaches 0
     struct list globalDeque;
     pthread_mutex_t poolMutex;
     pthread_cond_t workAvail; 
@@ -46,7 +46,7 @@ struct thread_pool {
 };
 
 
-static _Thread_local struct worker *currentWorker; 
+static _Thread_local struct worker *currentWorker; //HERE!!!! 
 
 /**
  * Check if there is any work to do for current worker.
@@ -78,6 +78,15 @@ steal_work()
     // 3. steal that work (dequeue from the local deque)
     //
     // if all fail do nothing
+
+    //iterates through workers in pool
+    struct thread_pool *pool = currentWorker->pool;
+    for(int i = 0; i< currentWorker->pool->workerCount; i++ ) {
+        if(!list_empty(&pool->workers[i]->localDeque)) {
+            //means work is there
+            return list_pop_back(&pool->workers[i]->localDeque);
+        }
+    }
     
     return NULL;
 }
