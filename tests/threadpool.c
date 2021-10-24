@@ -140,7 +140,6 @@ worker_thread(void * newWorker)
     }
 
     pthread_mutex_unlock(&pool->poolMutex);
-    free(currentWorker);
     return NULL;
 }
 
@@ -200,6 +199,7 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
     // wait for all workers to come home
     for (int i = 0; i < pool->workerCount; i++) {
         pthread_join(pool->workers[i]->tid, NULL);
+        free(pool->workers[i]);
     }
 
     pthread_mutex_destroy(&pool->poolMutex);
