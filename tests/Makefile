@@ -10,7 +10,7 @@
 #
 # for benchmarking we'll use this.
 # Note that this defines NDEBUG, which removes all assert()s from your code
-CFLAGS=-pthread -Wall -O3 -Werror -Wmissing-prototypes -fopenmp -DNDEBUG
+CFLAGS=-pthread -g -Wall -O3 -Werror -Wmissing-prototypes -fopenmp -DNDEBUG
 LDFLAGS=-pthread
 # for debugging, you may use these 2
 #LDFLAGS=-pthread -fsanitize=undefined
