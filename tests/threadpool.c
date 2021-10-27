@@ -27,7 +27,7 @@ struct future {
     struct thread_pool * pool;
     Status status;
     pthread_cond_t done;
-    struct worker * owner;
+    pthread_mutex_t *mutex;
 };
 
 struct worker {
@@ -71,6 +71,8 @@ no_work()
             
             if (!list_empty(&pool->workers[i]->localDeque)) {
                 noWork = false;
+                pthread_mutex_unlock(&pool->workers[i]->mutex);
+                break;
             }
 
             pthread_mutex_unlock(&pool->workers[i]->mutex);
@@ -82,10 +84,22 @@ no_work()
     return false;
 }
 
+static struct future * 
+transfer_owner(struct list_elem * elem) {
+    if (elem != NULL) {
+        struct future *fut = list_entry(elem, struct future, link);
+        fut->mutex = &currentWorker->mutex;
+
+        fut->status = RUNNING;
+        return fut;
+    } 
+    return NULL;
+}
+
 /**
  * Steal work from other workers (if possible).
  */
-static struct list_elem * 
+static struct future * 
 steal_work()
 {
     // 1. iterate through workers inside the pool
@@ -96,7 +110,7 @@ steal_work()
 
     //iterates through workers in pool
     struct thread_pool *pool = currentWorker->pool;
-    struct list_elem * stolen_work = NULL;
+    struct future * work = NULL;
 
     pthread_mutex_unlock(&pool->mutex);
 
@@ -104,7 +118,9 @@ steal_work()
         pthread_mutex_lock(&pool->workers[i]->mutex);
 
         if (pool->workers[i] != currentWorker && !list_empty(&pool->workers[i]->localDeque)) {
-            stolen_work = list_pop_back(&pool->workers[i]->localDeque);
+            work = transfer_owner(list_pop_back(&pool->workers[i]->localDeque));
+            pthread_mutex_unlock(&pool->workers[i]->mutex);
+            break;
         }
 
         pthread_mutex_unlock(&pool->workers[i]->mutex);
@@ -112,7 +128,7 @@ steal_work()
 
     pthread_mutex_lock(&pool->mutex);
     
-    return stolen_work;
+    return work;
 }
 
 /**
@@ -144,39 +160,33 @@ worker_thread(void * newWorker)
             pthread_cond_wait(&pool->workAvail, &pool->mutex);
         }
 
-        struct list_elem *elem;
+        struct future * fut;
         // case 3
         if (list_empty(&pool->globalDeque)) { 
-            elem = steal_work(); 
+            fut = steal_work(); 
         }
         // case 2
         else { 
-            elem = list_pop_back(&pool->globalDeque);
+            fut = transfer_owner(list_pop_back(&pool->globalDeque));
         }
 
         pthread_mutex_unlock(&pool->mutex);
-        pthread_mutex_lock(&currentWorker->mutex);
 
-        if (elem != NULL) {
+        if (fut != NULL) {
 
             // perfrom work
-            struct future *fut = list_entry(elem, struct future, link);
-            fut->owner = currentWorker;
-            fut->status = RUNNING;
-            
-            // unlock to avoid recursive lock from calling fut->task function
-            pthread_mutex_unlock(&currentWorker->mutex);
             // generate sub-task and store result 
             fut->result = fut->task(pool, fut->args);
-            // relock after getting result
-            pthread_mutex_lock(&currentWorker->mutex);
+            
+            pthread_mutex_lock(fut->mutex);
 
             fut->status = COMPLETED;
             pthread_cond_signal(&fut->done);
-            //printf("future done signaled\n");
+
+            pthread_mutex_unlock(fut->mutex);
+
         }
 
-        pthread_mutex_unlock(&currentWorker->mutex);
     }
 
     return NULL;
@@ -237,6 +247,7 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
     
     // wait for all workers to come home
     for (int i = 0; i < pool->workerCount; i++) {
+        //pthread_cond_broadcast(&pool->workAvail); 
         pthread_join(pool->workers[i]->tid, NULL);
     }
 
@@ -273,12 +284,14 @@ thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
 
     // external submission from main thread
     if (currentWorker == NULL) {
+        fut->mutex = &pool->mutex;
+
         pthread_mutex_lock(&pool->mutex); 
         list_push_front(&pool->globalDeque, &fut->link);
         pthread_mutex_unlock(&pool->mutex); 
     }
     else { //internal submision from worker thread
-        fut->owner = currentWorker;
+        fut->mutex = &currentWorker->mutex;
 
         pthread_mutex_lock(&currentWorker->mutex); 
         list_push_back(&currentWorker->localDeque, &fut->link);
@@ -305,24 +318,22 @@ future_get(struct future * fut)
 
     // main thread
     if (currentWorker == NULL) {
-
+        
         pthread_mutex_lock(&pool->mutex);
         while (fut->status == READY) {
-            //printf("main thread going to sleep\n");
             pthread_cond_wait(&fut->done, &pool->mutex);
-            //printf("main thread awake\n");
         }
         pthread_mutex_unlock(&pool->mutex);
-
-        pthread_mutex_lock(&fut->owner->mutex);
+       
+        pthread_mutex_lock(fut->mutex);
         while (fut->status != COMPLETED) {
-            pthread_cond_wait(&fut->done, &fut->owner->mutex);
+            pthread_cond_wait(&fut->done, fut->mutex);
         }
-        pthread_mutex_unlock(&fut->owner->mutex);
+        pthread_mutex_unlock(fut->mutex);
     }
     // worker thread
     else {
-        pthread_mutex_lock(&fut->owner->mutex);
+        pthread_mutex_lock(fut->mutex);
         // -- work helping --
         // 1. if the task is not yet started, then the worker would
         // executed it itself.
@@ -330,14 +341,14 @@ future_get(struct future * fut)
             // future is READY only when it is inside the deque.
             // so it is safe and must be remove from the deque to run it.
             list_remove(&fut->link);
-            //fut->owner = currentWorker;
+            fut->mutex = &currentWorker->mutex;
             fut->status = RUNNING;
 
             // unlock to avoid recursive lock from calling fut->task function
-            pthread_mutex_unlock(&fut->owner->mutex);
+            pthread_mutex_unlock(fut->mutex);
             // Perform task
             fut->result = fut->task(fut->pool, fut->args); 
-            pthread_mutex_lock(&fut->owner->mutex);
+            pthread_mutex_lock(fut->mutex);
             
             fut->status = COMPLETED;
             pthread_cond_signal(&fut->done); 
@@ -345,10 +356,10 @@ future_get(struct future * fut)
         // 2. otherwise, it could wait for it to finish
         else { // other worker is working on it
             while (fut->status != COMPLETED) {
-                pthread_cond_wait(&fut->done, &fut->owner->mutex);
+                pthread_cond_wait(&fut->done, fut->mutex);
             }
         }
-        pthread_mutex_unlock(&fut->owner->mutex);
+        pthread_mutex_unlock(fut->mutex);
     }
 
     return fut->result;
