@@ -57,29 +57,27 @@ static _Thread_local struct worker *currentWorker;
  * 2. global deque from thread pool is empty
  * 3. All other workers' local deque is empty (nothing to steal)
  */
+
 static bool
 no_work()
 { 
     struct thread_pool *pool = currentWorker->pool;
-    if (list_empty(&pool->globalDeque)) {
-        // check if all other workes' local deque is empty
-        bool noWork = true;
-        for (int i = 0; i < pool->workerCount; i++) {
+    for (int i = 0; i < pool->workerCount; i++) {
 
-            pthread_mutex_unlock(&pool->mutex);
-            pthread_mutex_lock(&pool->workers[i]->mutex);
-            
-            if (!list_empty(&pool->workers[i]->localDeque)) {
-                noWork = false;
-            }
-
+        pthread_mutex_unlock(&pool->mutex);
+        pthread_mutex_lock(&pool->workers[i]->mutex);
+        
+        if (!list_empty(&pool->workers[i]->localDeque)) {
             pthread_mutex_unlock(&pool->workers[i]->mutex);
             pthread_mutex_lock(&pool->mutex);
+            return false;
         }
-        return noWork;
 
+        pthread_mutex_unlock(&pool->workers[i]->mutex);
+        pthread_mutex_lock(&pool->mutex);
     }
-    return false;
+    return true;
+
 }
 
 
@@ -118,6 +116,8 @@ steal_work()
 
                 fut->status = COMPLETED;
                 pthread_cond_signal(&fut->done);
+                pthread_mutex_unlock(&pool->workers[i]->mutex);
+                break;
             }
         }
 
@@ -151,7 +151,10 @@ worker_thread(void * newWorker)
         if (pool->shutDown) {
             break;
         }
-        while (!pool->shutDown && no_work() && !pool->shutDown) {
+        while (no_work()) {
+            if (pool->shutDown || !list_empty(&pool->globalDeque)) {
+                break;
+            }
             // wait for workAvail signal
             pthread_cond_wait(&pool->workAvail, &pool->mutex);
         }
