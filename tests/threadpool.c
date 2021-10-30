@@ -63,47 +63,19 @@ static _Thread_local struct worker *currentWorker;
 static bool
 no_work()
 { 
-    struct thread_pool *pool = currentWorker->pool;
-    pthread_mutex_unlock(&pool->mutex);
-
-    for (int i = 0; i < pool->workerCount; i++) {
-
-        pthread_mutex_lock(&pool->workers[i]->mutex);
-        
-        if (!list_empty(&pool->workers[i]->localDeque)) {
-            pthread_mutex_unlock(&pool->workers[i]->mutex);
-            pthread_mutex_lock(&pool->mutex);
-            return false;
-        }
-
-        pthread_mutex_unlock(&pool->workers[i]->mutex);
-    }
-
-    pthread_mutex_lock(&pool->mutex);
-    return true;
-
-}
-
-
-/**
- * Steal work from other workers (if possible).
- */
-static void 
-steal_work()
-{
     // 1. iterate through workers inside the pool
     // 2. find the first worker have work (non-empty local deque)
     // 3. steal that work (dequeue from the local deque)
     //
     // if all fail do nothing
-
-    //iterates through workers in pool
+    
     struct thread_pool *pool = currentWorker->pool;
     struct list_elem * elem;
 
     pthread_mutex_unlock(&pool->mutex);
 
     for (int i = 0; i < pool->workerCount; i++) {
+
         pthread_mutex_lock(&pool->workers[i]->mutex);
 
         if (pool->workers[i] != currentWorker && !list_empty(&pool->workers[i]->localDeque)) {
@@ -122,15 +94,18 @@ steal_work()
                 pthread_cond_signal(&fut->done);
             }
             pthread_mutex_unlock(&pool->workers[i]->mutex);
-            break;
+            pthread_mutex_lock(&pool->mutex);
+            return false;
         }
 
         pthread_mutex_unlock(&pool->workers[i]->mutex);
     }
 
     pthread_mutex_lock(&pool->mutex);
-    
+    return true;
+
 }
+
 
 /**
  * Worker fetch a work in a following order:
@@ -163,13 +138,9 @@ worker_thread(void * newWorker)
             pthread_cond_wait(&pool->workAvail, &pool->mutex);
         }
 
-        struct list_elem * elem;
         // case 3
-        if (list_empty(&pool->globalDeque)) { 
-            steal_work(); 
-        }
-        // case 2
-        else { 
+        if (!list_empty(&pool->globalDeque)) { 
+            struct list_elem * elem;
             elem = list_pop_back(&pool->globalDeque);
             if (elem != NULL) {
                 struct future * fut = list_entry(elem, struct future, link);
