@@ -2,7 +2,7 @@
  * threadpool.c
  *
  * Written by: Bug Lee, Dana altarace
- * Last modified : 10/26/21
+ * Last modified : 10/29/21
  */
 
 #include "threadpool.h"
@@ -28,6 +28,7 @@ struct future {
     Status status;
     pthread_cond_t done;
     struct worker * owner;
+    int padding[4];
 };
 
 struct worker {
@@ -35,6 +36,7 @@ struct worker {
     struct list localDeque;
     pthread_t tid;
     pthread_mutex_t mutex;
+    int padding[10];
 };
 
 struct thread_pool {
@@ -45,6 +47,7 @@ struct thread_pool {
     pthread_cond_t workAvail; 
     pthread_barrier_t barrier;
     bool shutDown;
+    int padding[4];
 };
 
 
@@ -57,14 +60,14 @@ static _Thread_local struct worker *currentWorker;
  * 2. global deque from thread pool is empty
  * 3. All other workers' local deque is empty (nothing to steal)
  */
-
 static bool
 no_work()
 { 
     struct thread_pool *pool = currentWorker->pool;
+    pthread_mutex_unlock(&pool->mutex);
+
     for (int i = 0; i < pool->workerCount; i++) {
 
-        pthread_mutex_unlock(&pool->mutex);
         pthread_mutex_lock(&pool->workers[i]->mutex);
         
         if (!list_empty(&pool->workers[i]->localDeque)) {
@@ -74,8 +77,9 @@ no_work()
         }
 
         pthread_mutex_unlock(&pool->workers[i]->mutex);
-        pthread_mutex_lock(&pool->mutex);
     }
+
+    pthread_mutex_lock(&pool->mutex);
     return true;
 
 }
@@ -116,9 +120,9 @@ steal_work()
 
                 fut->status = COMPLETED;
                 pthread_cond_signal(&fut->done);
-                pthread_mutex_unlock(&pool->workers[i]->mutex);
-                break;
             }
+            pthread_mutex_unlock(&pool->workers[i]->mutex);
+            break;
         }
 
         pthread_mutex_unlock(&pool->workers[i]->mutex);
@@ -144,8 +148,8 @@ worker_thread(void * newWorker)
     struct thread_pool *pool = currentWorker->pool;
 
     pthread_barrier_wait(&pool->barrier);
-
     pthread_mutex_lock(&pool->mutex);
+
     while (true) {
 
         if (pool->shutDown) {
@@ -184,6 +188,7 @@ worker_thread(void * newWorker)
     }
 
     pthread_mutex_unlock(&pool->mutex);
+
     return NULL;
 }
 
@@ -224,6 +229,7 @@ thread_pool_new(int nthreads)
     // wait for all worker threads to be spawn before continuing
     pthread_barrier_wait(&pool->barrier);
 
+
     return pool;
 }
 
@@ -242,11 +248,11 @@ thread_pool_shutdown_and_destroy(struct thread_pool * pool)
     
     // wait for all workers to come home
     for (int i = 0; i < pool->workerCount; i++) {
-        //pthread_cond_broadcast(&pool->workAvail); 
         pthread_join(pool->workers[i]->tid, NULL);
     }
 
     for (int i = 0; i < pool->workerCount; i++) {
+        pthread_mutex_destroy(&pool->workers[i]->mutex);
         free(pool->workers[i]);
     }
 
@@ -296,7 +302,7 @@ thread_pool_submit(struct thread_pool *pool, fork_join_task_t task, void *data)
 
     // notify workers that work is available
     pthread_cond_signal(&pool->workAvail); 
-
+        
     return fut;
 }
 
