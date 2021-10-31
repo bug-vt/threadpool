@@ -2,11 +2,10 @@
  * threadpool.c
  *
  * Written by: Bug Lee, Dana altarace
- * Last modified : 10/29/21
+ * Last modified : 10/30/21
  */
 
 #include "threadpool.h"
-//#include "wrapper.h"
 #include <stdbool.h>
 #include "list.h"
 #include <pthread.h>
@@ -53,12 +52,10 @@ struct thread_pool {
 
 static _Thread_local struct worker *currentWorker; 
 
+
 /**
- * Check if there is any work to do for current worker.
- * There is no work when all following are met:
- * 1. local deque from current worker is empty
- * 2. global deque from thread pool is empty
- * 3. All other workers' local deque is empty (nothing to steal)
+ * steal work from other workers.
+ * @return true if the current worker steal work; false otherwise.
  */
 static bool
 steal_work()
@@ -108,11 +105,9 @@ steal_work()
 
 
 /**
- * Worker fetch a work in a following order:
- * case 1. Perform task by dequeuing from worker's own deque
- * case 2. If empty, check global queue first and dequeue
- * case 3. Otherwise, try to steal task from other worker's deque
- * case 4. If all the above fail, idle
+ * In fully-strict workload model, worker will either 
+ * 1. steal work from other workers
+ * 2. fetch the work from the global queue
  */
 static void *
 worker_thread(void * newWorker)
@@ -138,7 +133,6 @@ worker_thread(void * newWorker)
             pthread_cond_wait(&pool->workAvail, &pool->mutex);
         }
 
-        // case 3
         if (!list_empty(&pool->globalDeque)) { 
             struct list_elem * elem;
             elem = list_pop_back(&pool->globalDeque);
@@ -204,7 +198,9 @@ thread_pool_new(int nthreads)
     return pool;
 }
 
-
+/**
+ * release all the resources held by thread pool
+ */
 void 
 thread_pool_shutdown_and_destroy(struct thread_pool * pool)
 {
@@ -330,6 +326,9 @@ future_get(struct future * fut)
     return fut->result;
 }
 
+/**
+ * release resources that held by future
+ */
 void 
 future_free(struct future * fut)
 {
