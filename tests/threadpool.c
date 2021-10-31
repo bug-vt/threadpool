@@ -61,7 +61,7 @@ static _Thread_local struct worker *currentWorker;
  * 3. All other workers' local deque is empty (nothing to steal)
  */
 static bool
-no_work()
+steal_work()
 { 
     // 1. iterate through workers inside the pool
     // 2. find the first worker have work (non-empty local deque)
@@ -95,14 +95,14 @@ no_work()
             }
             pthread_mutex_unlock(&pool->workers[i]->mutex);
             pthread_mutex_lock(&pool->mutex);
-            return false;
+            return true;
         }
 
         pthread_mutex_unlock(&pool->workers[i]->mutex);
     }
 
     pthread_mutex_lock(&pool->mutex);
-    return true;
+    return false;
 
 }
 
@@ -130,7 +130,7 @@ worker_thread(void * newWorker)
         if (pool->shutDown) {
             break;
         }
-        while (no_work()) {
+        while (!steal_work()) {
             if (pool->shutDown || !list_empty(&pool->globalDeque)) {
                 break;
             }
